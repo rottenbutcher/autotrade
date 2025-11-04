@@ -1,0 +1,11 @@
+torch
+pandas
+numpy
+yfinance
+apscheduler
+pyupbit
+wandb
+scikit-learn
+tqdm
+matplotlib
+boto3

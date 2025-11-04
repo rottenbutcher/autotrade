@@ -1,0 +1,11 @@
+{
+  "INSTANCE_ID": "i-0abcd1234ef56789",
+  "REGION": "ap-northeast-2",
+  "S3_BUCKET": "my-btc-mae-backups",
+  "BACKUP_PATHS": [
+    "models/dual_mae_encoder.pth",
+    "models/btc_predictor.pth",
+    "utils/trade_log.csv",
+    "reports/"
+  ]
+}
