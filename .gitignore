@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Dataset and model artifacts
+/dataset.csv
+/models/tsmae_encoder.pth
+/models/btc_predictor.pth
+/logs/
