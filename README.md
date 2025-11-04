@@ -178,6 +178,8 @@ You can make EC2 automatically initialize the full environment at boot:
 
    ```bash
    #!/bin/bash
+   export REPO_URL="https://github.com/<your-username>/<repo-name>.git"
+   export REPO_DIR="autotrade"  # optional override
    su ubuntu -c "bash /home/ubuntu/aws_automation/setup_ec2.sh"
    ```
 
@@ -196,6 +198,10 @@ Logs are stored in:
 /home/ubuntu/ec2_setup.log
 /home/ubuntu/scheduler_output.log
 ```
+
+> ℹ️ **Configure before first boot:** Update `aws_automation/config.json` with your repository URL and preferred directory (or
+> set the `REPO_URL`/`REPO_DIR` environment variables in the user data snippet above). The bootstrap script validates these
+> values to avoid cloning placeholder URLs.
 
 ## 9️⃣ Final Note
 ⚠️ **Disclaimer**: This system is provided for educational and research purposes only. Cryptocurrency trading carries substantial financial risk. Operate at your own discretion and responsibility.
