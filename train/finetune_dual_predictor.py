@@ -117,6 +117,9 @@ def train_epoch(
     criterion: nn.Module,
     optimizer: torch.optim.Optimizer,
     device: torch.device,
+    scaler: torch.cuda.amp.GradScaler,
+    autocast_enabled: bool,
+    non_blocking: bool,
 ) -> Tuple[float, float]:
     classifier.train()
     total_loss = 0.0
@@ -124,18 +127,21 @@ def train_epoch(
     total_samples = 0
 
     for xb_batch, xs_batch, y_batch in dataloader:
-        xb_batch = xb_batch.to(device)
-        xs_batch = xs_batch.to(device)
-        y_batch = y_batch.to(device)
+        xb_batch = xb_batch.to(device, non_blocking=non_blocking)
+        xs_batch = xs_batch.to(device, non_blocking=non_blocking)
+        y_batch = y_batch.to(device, non_blocking=non_blocking)
 
         with torch.no_grad():
-            latent = encoder.encode(xb_batch, xs_batch)
-        preds = classifier(latent)
-        loss = criterion(preds, y_batch)
+            with torch.cuda.amp.autocast(enabled=autocast_enabled):
+                latent = encoder.encode(xb_batch, xs_batch)
+        with torch.cuda.amp.autocast(enabled=autocast_enabled):
+            preds = classifier(latent)
+            loss = criterion(preds, y_batch)
 
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
+        optimizer.zero_grad(set_to_none=True)
+        scaler.scale(loss).backward()
+        scaler.step(optimizer)
+        scaler.update()
 
         total_loss += loss.item() * xb_batch.size(0)
         predicted = (preds >= 0.5).float()
@@ -153,6 +159,8 @@ def evaluate(
     dataloader: DataLoader,
     criterion: nn.Module,
     device: torch.device,
+    autocast_enabled: bool,
+    non_blocking: bool,
 ) -> Tuple[float, float]:
     classifier.eval()
     total_loss = 0.0
@@ -161,13 +169,14 @@ def evaluate(
 
     with torch.no_grad():
         for xb_batch, xs_batch, y_batch in dataloader:
-            xb_batch = xb_batch.to(device)
-            xs_batch = xs_batch.to(device)
-            y_batch = y_batch.to(device)
+            xb_batch = xb_batch.to(device, non_blocking=non_blocking)
+            xs_batch = xs_batch.to(device, non_blocking=non_blocking)
+            y_batch = y_batch.to(device, non_blocking=non_blocking)
 
-            latent = encoder.encode(xb_batch, xs_batch)
-            preds = classifier(latent)
-            loss = criterion(preds, y_batch)
+            with torch.cuda.amp.autocast(enabled=autocast_enabled):
+                latent = encoder.encode(xb_batch, xs_batch)
+                preds = classifier(latent)
+                loss = criterion(preds, y_batch)
 
             total_loss += loss.item() * xb_batch.size(0)
             predicted = (preds >= 0.5).float()
@@ -183,23 +192,68 @@ def main() -> None:
     config = FineTuneConfig()
     train_ds, val_ds = load_dataset(seq_len=config.seq_len)
 
-    train_loader = DataLoader(train_ds, batch_size=config.batch_size, shuffle=True)
-    val_loader = DataLoader(val_ds, batch_size=config.batch_size, shuffle=False)
-
     device = config.device
+    pin_memory = device.type == "cuda"
+    train_loader = DataLoader(
+        train_ds,
+        batch_size=config.batch_size,
+        shuffle=True,
+        pin_memory=pin_memory,
+    )
+    val_loader = DataLoader(
+        val_ds,
+        batch_size=config.batch_size,
+        shuffle=False,
+        pin_memory=pin_memory,
+    )
+
+    if device.type == "cuda":
+        torch.backends.cudnn.benchmark = True
     encoder = _load_encoder(device)
     classifier = BTCClassifier().to(device)
 
     criterion = nn.BCELoss()
     optimizer = torch.optim.AdamW(classifier.parameters(), lr=config.learning_rate)
+    scaler = torch.cuda.amp.GradScaler(enabled=device.type == "cuda")
 
     run = _init_wandb()
+    if run is not None and device.type == "cuda":
+        device_index = device.index if device.index is not None else torch.cuda.current_device()
+        props = torch.cuda.get_device_properties(device_index)
+        run.config.update(
+            {
+                "GPU_Name": torch.cuda.get_device_name(device_index),
+                "CUDA_Capability": f"{props.major}.{props.minor}",
+                "VRAM_GB": props.total_memory / 1e9,
+            },
+            allow_val_change=True,
+        )
     os.makedirs(os.path.dirname(PREDICTOR_PATH), exist_ok=True)
 
+    autocast_enabled = device.type == "cuda"
+    non_blocking = pin_memory
     best_val_loss = float("inf")
     for epoch in range(1, config.epochs + 1):
-        train_loss, train_acc = train_epoch(encoder, classifier, train_loader, criterion, optimizer, device)
-        val_loss, val_acc = evaluate(encoder, classifier, val_loader, criterion, device)
+        train_loss, train_acc = train_epoch(
+            encoder,
+            classifier,
+            train_loader,
+            criterion,
+            optimizer,
+            device,
+            scaler,
+            autocast_enabled,
+            non_blocking,
+        )
+        val_loss, val_acc = evaluate(
+            encoder,
+            classifier,
+            val_loader,
+            criterion,
+            device,
+            autocast_enabled,
+            non_blocking,
+        )
 
         if run is not None:
             run.log({

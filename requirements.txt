@@ -8,3 +8,4 @@ wandb
 scikit-learn
 tqdm
 matplotlib
+boto3

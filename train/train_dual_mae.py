@@ -18,7 +18,7 @@ except ImportError:  # pragma: no cover - optional dependency guard
 DATA_PATH = os.path.join(os.path.dirname(__file__), "..", "data_pipeline", "dataset.csv")
 MODEL_PATH = os.path.join(os.path.dirname(__file__), "..", "models", "dual_mae_encoder.pth")
 SEQ_LEN = 30
-BATCH_SIZE = 32
+BATCH_SIZE = 64
 EPOCHS = 100
 LR = 1e-4
 
@@ -53,27 +53,53 @@ def _init_wandb():
 
 def main() -> None:
     dataset = load_dataset()
-    dataloader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True, drop_last=False)
-
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    pin_memory = device.type == "cuda"
+    dataloader = DataLoader(
+        dataset,
+        batch_size=BATCH_SIZE,
+        shuffle=True,
+        drop_last=False,
+        pin_memory=pin_memory,
+    )
+
+    if device.type == "cuda":
+        torch.backends.cudnn.benchmark = True
+
+    print(f"🚀 Using device: {device}")
     model = DualStreamMAE().to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=LR)
+    scaler = torch.cuda.amp.GradScaler(enabled=device.type == "cuda")
 
     run = _init_wandb()
+    if run is not None and device.type == "cuda":
+        device_index = device.index if device.index is not None else torch.cuda.current_device()
+        props = torch.cuda.get_device_properties(device_index)
+        run.config.update(
+            {
+                "GPU_Name": torch.cuda.get_device_name(device_index),
+                "CUDA_Capability": f"{props.major}.{props.minor}",
+                "VRAM_GB": props.total_memory / 1e9,
+            },
+            allow_val_change=True,
+        )
 
     os.makedirs(os.path.dirname(MODEL_PATH), exist_ok=True)
 
+    autocast_enabled = device.type == "cuda"
     for epoch in range(1, EPOCHS + 1):
         model.train()
         epoch_loss = 0.0
         for btc_batch, stock_batch in tqdm(dataloader, desc=f"Epoch {epoch}"):
-            btc_batch = btc_batch.to(device)
-            stock_batch = stock_batch.to(device)
+            btc_batch = btc_batch.to(device, non_blocking=pin_memory)
+            stock_batch = stock_batch.to(device, non_blocking=pin_memory)
 
-            loss, _ = model(btc_batch, stock_batch)
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
+            with torch.cuda.amp.autocast(enabled=autocast_enabled):
+                loss, _ = model(btc_batch, stock_batch)
+            optimizer.zero_grad(set_to_none=True)
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
 
             epoch_loss += loss.item()
 

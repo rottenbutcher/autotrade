@@ -127,9 +127,11 @@ def trade_morning() -> None:
     except Exception as exc:
         print(f"⚠️ Failed to prepare input window: {exc}")
         return
+    amp_enabled = device.type == "cuda"
     with torch.no_grad():
-        latent = encoder.encode(btc_window, stock_window)
-        probability = classifier(latent).item()
+        with torch.cuda.amp.autocast(enabled=amp_enabled):
+            latent = encoder.encode(btc_window, stock_window)
+            probability = classifier(latent).item()
 
     current_price = _get_current_price()
     run = _init_wandb(f"trade_{datetime.now().strftime('%Y%m%d')}")
